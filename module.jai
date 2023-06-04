@@ -1,9 +1,10 @@
 // TODO maybe this can be updated to dynamically correspond to your cache size or something
 // TODO or whatever size necessary to fit memory and active in cache idk
-BlockAllocator :: struct (type: Type, count: int = 1024) {
+BlockAllocator :: struct (type: Type, block_count: int = 1024) {
     memory: [..] [] BlockInformation(type);
     last_block_index: int;
     last_entry_index: int;
+    count: int;
 }
 
 BlockInformation :: struct (type: Type) {
@@ -49,40 +50,42 @@ operator [] :: (using allocator: *BlockAllocator($T, $N), index: int) -> *T {
 for_expansion :: (using allocator: *BlockAllocator($T, $N), body: Code, flags: For_Flags) #expand {
     #assert(!(flags & .REVERSE)); // We don't handle the reverse flag.
 
-    `it_index := 0;
-    while it_index < memory.count * N {
-        block_index: int = it_index / N;
-        entry_index: int = it_index % N;
+    index := 0;
+    while index < memory.count * N {
+        defer index += 1;
+
+        block_index: int = index / N;
+        entry_index: int = index % N;
 
         // I forgot what this does, lets you assign?
         #if flags & .POINTER {
             if !memory[block_index][entry_index].active {
-                it_index += 1;
+                index += 1;
                 continue;
             }
 
+            `it_index := index;
             `it := *memory[block_index][entry_index].item;
+
+            defer memory[block_index][entry_index].active = ifx it == null then false else true;
+            defer memory[block_index][entry_index].item = << it;
         
             #insert body;
-
-            memory[block_index][entry_index].active = ifx it == null then false else true;
-            memory[block_index][entry_index].item = << it;
         } else {
             if !memory[block_index][entry_index].active {
-                it_index += 1;
+                index += 1;
                 continue;
             }
 
-            it := memory[block_index][entry_index].item;
+            `it_index := index;
+            `it := memory[block_index][entry_index].item;
         
             #insert body;
         }
-        
-        it_index += 1;
     }
 }
 
-claim :: (allocator: *BlockAllocator($T)) -> *T {
+claim :: (allocator: *BlockAllocator($T, $N)) -> *T {
     entry: T;
     return claim(allocator, entry);
 }
@@ -98,6 +101,8 @@ claim :: (using allocator: *BlockAllocator($T, $N), entry: T) -> *T {
     }
 
     assert(last_block_index < memory.count, "Attempting to allocate into memory that doesn't exist.");
+    
+    allocator.count += 1;
 
     start_block_index := last_block_index;
     start_entry_index := last_entry_index;
@@ -158,6 +163,8 @@ release :: (using allocator: *BlockAllocator($T, $N), entry: *T) {
         }
     }
 
+    allocator.count -= 1;
+
     assert(false, "Could not find entry to free.");
 }
 
@@ -167,6 +174,8 @@ clear :: (using allocator: *BlockAllocator($T, $N)) {
     for block_index: 0..memory.count - 1 {
         memcpy(memory[block_index].data, entry.data, size_of(type_of(entry)));
     }
+
+    allocator.count = 0;
 }
 
 validate_empty :: (using allocator: BlockAllocator($T, $N)) {
