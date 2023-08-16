@@ -1,6 +1,17 @@
 // TODO maybe this can be updated to dynamically correspond to your cache size or something
 // TODO or whatever size necessary to fit memory and active in cache idk
 BlockAllocator :: struct (type: Type, block_count: int = 1024) {
+    ITEM_OFFSET :: #run () -> int {
+        struct_data := cast(*Type_Info_Struct) type_info(BlockInformation(type));
+        for member: struct_data.members {
+            if member.name == "item" {
+                return member.offset_in_bytes;
+            }
+        }
+
+        assert(false, "Could not find item offset.");
+        return 0;
+    }();
     memory: [..] [] BlockInformation(type);
     last_block_index: int;
     last_entry_index: int;
@@ -11,9 +22,6 @@ BlockInformation :: struct (type: Type) {
     active: bool;
     item: type;
 }
-
-// TODO do this dynamically
-ITEM_OFFSET :: size_of(bool);
 
 operator [] :: (using allocator: BlockAllocator($T, $N), index: int) -> T {
     #if DEBUG {
@@ -60,20 +68,17 @@ for_expansion :: (using allocator: *BlockAllocator($T, $N), body: Code, flags: F
         // I forgot what this does, lets you assign?
         #if flags & .POINTER {
             if !memory[block_index][entry_index].active {
-                index += 1;
                 continue;
             }
 
             `it_index := index;
             `it := *memory[block_index][entry_index].item;
 
-            defer memory[block_index][entry_index].active = ifx it == null then false else true;
             defer memory[block_index][entry_index].item = << it;
         
             #insert body;
         } else {
             if !memory[block_index][entry_index].active {
-                index += 1;
                 continue;
             }
 
@@ -149,6 +154,26 @@ claim :: (using allocator: *BlockAllocator($T, $N), entry: T) -> *T {
     return pointer;
 }
 
+// #run () {
+//     test_allocator: BlockAllocator(int);
+//     int1 := claim(*test_allocator);
+//     int1.* = 1;
+//     int2 := claim(*test_allocator);
+//     int2.* = 2;
+//     int3 := claim(*test_allocator);
+//     int3.* = 3;
+
+//     for val: test_allocator {
+//         print("Found1 %\n", val);
+//     }
+
+//     release(*test_allocator, int2);
+
+//     for val: test_allocator {
+//         print("Found2 %\n", val);
+//     }
+// }();
+
 release :: (using allocator: *BlockAllocator($T, $N), entry: *T) {
     pointer := cast(*BlockInformation(T)) ((cast(*u8) entry) - ITEM_OFFSET);
     // TODO this whole thing should use an index system to point into the previously freed memory like a circle
@@ -156,14 +181,15 @@ release :: (using allocator: *BlockAllocator($T, $N), entry: *T) {
         block := memory[block_index];
 
         if pointer >= block.data && pointer < block.data + N {
-            index_offset := pointer - block.data;
+            index_offset := cast(int) (pointer - block.data);
 
-            memory[block_index][index_offset].active = false;
+            if memory[block_index][index_offset].active {
+                memory[block_index][index_offset].active = false;
+                allocator.count -= 1;
+            }
             return;
         }
     }
-
-    allocator.count -= 1;
 
     assert(false, "Could not find entry to free.");
 }
