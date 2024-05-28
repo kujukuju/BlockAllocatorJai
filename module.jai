@@ -55,37 +55,69 @@ operator [] :: (using allocator: *BlockAllocator($T, $N), index: int) -> *T {
 }
 
 // TODO should use fancy next pointer things to hop around to only active memory, I think?
+// TODO this seems to have issues when looping in a multithreaded environment
 for_expansion :: (using allocator: *BlockAllocator($T, $N), body: Code, flags: For_Flags) #expand {
-    #assert(!(flags & .REVERSE)); // We don't handle the reverse flag.
+    #if flags & .REVERSE {
+        index := memory.count * N - 1;
+        while index >= 0 {
+            defer index -= 1;
 
-    index := 0;
-    while index < memory.count * N {
-        defer index += 1;
+            block_index: int = index / N;
+            entry_index: int = index % N;
 
-        block_index: int = index / N;
-        entry_index: int = index % N;
+            // I forgot what this does, lets you assign?
+            #if flags & .POINTER {
+                if !memory[block_index][entry_index].active {
+                    continue;
+                }
 
-        // I forgot what this does, lets you assign?
-        #if flags & .POINTER {
-            if !memory[block_index][entry_index].active {
-                continue;
+                `it_index := index;
+                `it := *memory[block_index][entry_index].item;
+
+                defer memory[block_index][entry_index].item = << it;
+            
+                #insert body;
+            } else {
+                if !memory[block_index][entry_index].active {
+                    continue;
+                }
+
+                `it_index := index;
+                `it := memory[block_index][entry_index].item;
+            
+                #insert body;
             }
+        }
+    } else {
+        index := 0;
+        while index < memory.count * N {
+            defer index += 1;
 
-            `it_index := index;
-            `it := *memory[block_index][entry_index].item;
+            block_index: int = index / N;
+            entry_index: int = index % N;
 
-            defer memory[block_index][entry_index].item = << it;
-        
-            #insert body;
-        } else {
-            if !memory[block_index][entry_index].active {
-                continue;
+            // I forgot what this does, lets you assign?
+            #if flags & .POINTER {
+                if !memory[block_index][entry_index].active {
+                    continue;
+                }
+
+                `it_index := index;
+                `it := *memory[block_index][entry_index].item;
+
+                defer memory[block_index][entry_index].item = << it;
+            
+                #insert body;
+            } else {
+                if !memory[block_index][entry_index].active {
+                    continue;
+                }
+
+                `it_index := index;
+                `it := memory[block_index][entry_index].item;
+            
+                #insert body;
             }
-
-            `it_index := index;
-            `it := memory[block_index][entry_index].item;
-        
-            #insert body;
         }
     }
 }
@@ -218,7 +250,7 @@ DEBUG :: true;
 
 increment_index :: inline (allocator: *BlockAllocator($T, $N), block_index: int, entry_index: int) -> block_index: int, entry_index: int {
     if entry_index == N - 1 {
-        next_block_index := (block_index + 1) % N;
+        next_block_index := (block_index + 1) % allocator.memory.count;
 
         return next_block_index, 0;
     }
