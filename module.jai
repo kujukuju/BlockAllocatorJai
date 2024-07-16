@@ -1,8 +1,21 @@
-// TODO maybe this can be updated to dynamically correspond to your cache size or something
-// TODO or whatever size necessary to fit memory and active in cache idk
-BlockAllocator :: struct (type: Type, block_count: int = 1024) {
+
+
+
+
+
+
+
+
+
+
+
+
+// TODO this library is a good idea, but it needs to use the idea of next indices for freeing AND allocating or its pointless
+// TODO this whole thing should use an index system to point into the previously freed memory like a circle
+
+BlockAllocator :: struct (T: Type, N: int = 64) {
     ITEM_OFFSET :: #run () -> int {
-        struct_data := cast(*Type_Info_Struct) type_info(BlockInformation(type));
+        struct_data := cast(*Type_Info_Struct) type_info(BlockEntry(T));
         for member: struct_data.members {
             if member.name == "item" {
                 return member.offset_in_bytes;
@@ -12,112 +25,71 @@ BlockAllocator :: struct (type: Type, block_count: int = 1024) {
         assert(false, "Could not find item offset.");
         return 0;
     }();
-    memory: [..] [] BlockInformation(type);
-    last_block_index: int;
-    last_entry_index: int;
+
+    allocator: Allocator;
+
+    memory: [..] Block(T);
     count: int;
 }
 
-BlockInformation :: struct (type: Type) {
-    active: bool;
-    item: type;
+Block :: struct (T: Type) {
+    entries: [] BlockEntry(T);
+    count: int;
 }
 
-operator [] :: (using allocator: BlockAllocator($T, $N), index: int) -> T {
-    #if DEBUG {
-        assert(index >= 0 && index < memory.count * N);
-    }
+BlockEntry :: struct (T: Type) {
+    active: bool;
+    item: T;
+}
 
+operator [] :: (allocator: BlockAllocator($T, $N), index: int) -> T {
     block_index: int = index / N;
     entry_index: int = index % N;
 
-    assert(memory[block_index][entry_index].active, "Cannot access unclaimed memory.");
-    if !memory[block_index][entry_index].active {
+    assert(allocator.memory[block_index].entries[entry_index].active, "Cannot access unclaimed memory.");
+    if !allocator.memory[block_index].entries[entry_index].active {
         return .{};
     }
 
-    return memory[block_index][entry_index].item;
+    return allocator.memory[block_index].entries[entry_index].item;
 }
 
-operator [] :: (using allocator: *BlockAllocator($T, $N), index: int) -> *T {
-    #if DEBUG {
-        assert(index >= 0 && index < memory.count * N);
-    }
-
+operator [] :: (allocator: *BlockAllocator($T, $N), index: int) -> *T {
     block_index: int = index / N;
     entry_index: int = index % N;
 
-    if !memory[block_index][entry_index].active {
+    if !allocator.memory[block_index].entries[entry_index].active {
         return null;
     }
 
-    return *memory[block_index][entry_index].item;
+    return *allocator.memory[block_index].entries[entry_index].item;
 }
 
 // TODO should use fancy next pointer things to hop around to only active memory, I think?
 // TODO this seems to have issues when looping in a multithreaded environment
-for_expansion :: (using allocator: *BlockAllocator($T, $N), body: Code, flags: For_Flags) #expand {
-    #if flags & .REVERSE {
-        index := memory.count * N - 1;
-        while index >= 0 {
-            defer index -= 1;
+for_expansion :: (allocator: *BlockAllocator($T, $N), body: Code, flags: For_Flags) #expand {
+    #assert(!(flags & .REVERSE));
 
-            block_index: int = index / N;
-            entry_index: int = index % N;
+    for index: 0..allocator.memory.count * N - 1 {
+        block_index: int = index / N;
+        entry_index: int = index % N;
 
-            // I forgot what this does, lets you assign?
-            #if flags & .POINTER {
-                if !memory[block_index][entry_index].active {
-                    continue;
-                }
-
-                `it_index := index;
-                `it := *memory[block_index][entry_index].item;
-
-                defer memory[block_index][entry_index].item = << it;
-            
-                #insert body;
-            } else {
-                if !memory[block_index][entry_index].active {
-                    continue;
-                }
-
-                `it_index := index;
-                `it := memory[block_index][entry_index].item;
-            
-                #insert body;
-            }
+        if !allocator.memory[block_index].entries[entry_index].active {
+            continue;
         }
-    } else {
-        index := 0;
-        while index < memory.count * N {
-            defer index += 1;
 
-            block_index: int = index / N;
-            entry_index: int = index % N;
+        #if flags & .POINTER {
+            `it_index := index;
+            `it := *allocator.memory[block_index].entries[entry_index].item;
 
-            // I forgot what this does, lets you assign?
-            #if flags & .POINTER {
-                if !memory[block_index][entry_index].active {
-                    continue;
-                }
-
-                `it_index := index;
-                `it := *memory[block_index][entry_index].item;
-
-                defer memory[block_index][entry_index].item = << it;
-            
-                #insert body;
-            } else {
-                if !memory[block_index][entry_index].active {
-                    continue;
-                }
-
-                `it_index := index;
-                `it := memory[block_index][entry_index].item;
-            
-                #insert body;
-            }
+            // defer memory[block_index].entries[entry_index].item = it.*;
+        
+            #insert body;
+        } else {
+            `it_index := index;
+            `it := allocator.memory[block_index].entries[entry_index].item;
+        
+            #insert (remove={release(allocator, index);}) body;
         }
     }
 }
@@ -127,98 +99,50 @@ claim :: (allocator: *BlockAllocator($T, $N)) -> *T {
     return claim(allocator, entry);
 }
 
-claim :: (using allocator: *BlockAllocator($T, $N), entry: T) -> *T {
-    if memory.count > 0 {
-        last_block_index = (last_block_index % memory.count);
-    }
-
-    if last_block_index >= memory.count {
-        memory_entry := NewArray(N, BlockInformation(T));
-        array_add(*memory, memory_entry);
-    }
-
-    assert(last_block_index < memory.count, "Attempting to allocate into memory that doesn't exist.");
-    
-    allocator.count += 1;
-
-    start_block_index := last_block_index;
-    start_entry_index := last_entry_index;
-
-    if !memory[last_block_index][last_entry_index].active {
-        memory[last_block_index][last_entry_index].item = entry;
-        memory[last_block_index][last_entry_index].active = true;
-
-        pointer: *T = *memory[last_block_index][last_entry_index].item;
-        last_block_index, last_entry_index = increment_index(allocator, last_block_index, last_entry_index);
-
-        return pointer;
-    }
-
-    last_block_index, last_entry_index = increment_index(allocator, last_block_index, last_entry_index);
-
-    while last_block_index != start_block_index && last_entry_index != start_entry_index {
-        if !memory[last_block_index][last_entry_index].active {
-            memory[last_block_index][last_entry_index].item = entry;
-            memory[last_block_index][last_entry_index].active = true;
-
-            pointer: *T = *memory[last_block_index][last_entry_index].item;
-            last_block_index, last_entry_index = increment_index(allocator, last_block_index, last_entry_index);
-
-            return pointer;
+claim :: (allocator: *BlockAllocator($T, $N), entry: T) -> *T {
+    if allocator.count >= allocator.memory.count * N {
+        if allocator.memory.allocated > allocator.memory.count {
+            allocator.memory.count += 1;
+        } else {
+            array_resize(*allocator.memory, allocator.memory.count + 1,, allocator.allocator);
         }
 
-        last_block_index, last_entry_index = increment_index(allocator, last_block_index, last_entry_index);
+        if allocator.memory[allocator.memory.count - 1].entries.data == null {
+            allocator.memory[allocator.memory.count - 1].entries = NewArray(N, BlockEntry(T),, allocator.allocator);
+        }
     }
 
-    // no available memory exists, so add more
-    memory_entry := NewArray(N, BlockInformation(T));
-    array_add(*memory, memory_entry);
+    for block_index: 0..allocator.memory.count - 1 {
+        if allocator.memory[block_index].count == N {
+            continue;
+        }
 
-    last_block_index = memory.count - 1;
-    last_entry_index = 0;
+        for entry_index: 0..N - 1 {
+            if !allocator.memory[block_index].entries[entry_index].active {
+                allocator.memory[block_index].entries[entry_index].active = true;
+                allocator.memory[block_index].entries[entry_index].item = entry;
+                allocator.memory[block_index].count += 1;
+                allocator.count += 1;
+                return *allocator.memory[block_index].entries[entry_index].item;
+            }
+        }
+    }
 
-    memory[last_block_index][last_entry_index].item = entry;
-    memory[last_block_index][last_entry_index].active = true;
-
-    pointer: *T = *memory[last_block_index][last_entry_index].item;
-    last_block_index, last_entry_index = increment_index(allocator, last_block_index, last_entry_index);
-
-    return pointer;
+    return null;
 }
 
-// #run () {
-//     test_allocator: BlockAllocator(int);
-//     int1 := claim(*test_allocator);
-//     int1.* = 1;
-//     int2 := claim(*test_allocator);
-//     int2.* = 2;
-//     int3 := claim(*test_allocator);
-//     int3.* = 3;
+release :: (allocator: *BlockAllocator($T, $N), entry: *T) {
+    pointer := cast(*BlockEntry(T)) ((cast(*u8) entry) - BlockAllocator(T, N).ITEM_OFFSET);
+    for block_index: 0..allocator.memory.count - 1 {
+        entries_pointer := allocator.memory[block_index].entries.data;
 
-//     for val: test_allocator {
-//         print("Found1 %\n", val);
-//     }
+        if pointer >= entries_pointer && pointer < entries_pointer + N {
+            entry_index := cast(int) (pointer - entries_pointer);
 
-//     release(*test_allocator, int2);
-
-//     for val: test_allocator {
-//         print("Found2 %\n", val);
-//     }
-// }();
-
-release :: (using allocator: *BlockAllocator($T, $N), entry: *T) {
-    pointer := cast(*BlockInformation(T)) ((cast(*u8) entry) - ITEM_OFFSET);
-    // TODO this whole thing should use an index system to point into the previously freed memory like a circle
-    for block_index: 0..memory.count - 1 {
-        block := memory[block_index];
-
-        if pointer >= block.data && pointer < block.data + N {
-            index_offset := cast(int) (pointer - block.data);
-
-            if memory[block_index][index_offset].active {
-                memory[block_index][index_offset].active = false;
-                allocator.count -= 1;
+            if allocator.memory[block_index].entries[entry_index].active {
+                release(allocator, block_index * N + entry_index);
             }
+
             return;
         }
     }
@@ -226,36 +150,158 @@ release :: (using allocator: *BlockAllocator($T, $N), entry: *T) {
     assert(false, "Could not find entry to free.");
 }
 
-clear :: (using allocator: *BlockAllocator($T, $N)) {
-    entry: [N] BlockInformation(T);
+release :: (allocator: *BlockAllocator($T, $N), index: int, $free_empty: bool = false) {
+    block_index: int = index / N;
+    entry_index: int = index % N;
 
-    for block_index: 0..memory.count - 1 {
-        memcpy(memory[block_index].data, entry.data, size_of(type_of(entry)));
+    allocator.memory[block_index].entries[entry_index].active = false;
+    allocator.memory[block_index].count -= 1;
+    allocator.count -= 1;
+
+    if allocator.memory[block_index].count <= 0 {
+        #if free_empty {
+            array_free(allocator.memory[block_index].entries,, allocator.allocator);
+            allocator.memory[block_index].entries.data = null;
+        }
+
+        freed_entry := allocator.memory[block_index].entries;
+
+        for i: block_index..allocator.memory.count - 2 {
+            allocator.memory[i] = allocator.memory[i + 1];
+        }
+        allocator.memory[allocator.memory.count - 1].entries = freed_entry;
+
+        allocator.memory.count -= 1;
+    }
+}
+
+clear :: (allocator: *BlockAllocator($T, $N)) {
+    entries: [N] BlockEntry(T);
+
+    for block_index: 0..allocator.memory.count - 1 {
+        memcpy(allocator.memory[block_index].entries.data, entries.data, size_of(type_of(entries)));
+        allocator.memory[block_index].count = 0;
     }
 
+    allocator.memory.count = 0;
     allocator.count = 0;
 }
 
-validate_empty :: (using allocator: BlockAllocator($T, $N)) {
-    for block_index: 0..memory.count - 1 {
-        for i: 0..N - 1 {
-            assert(!memory[block_index][i].active, "Could not validate block allocator as empty.");
+validate_empty :: (allocator: BlockAllocator($T, $N)) {
+    for block_index: 0..allocator.memory.count - 1 {
+        for entry_index: 0..N - 1 {
+            assert(!memory[block_index].entries[entry_index].active, "Could not validate block allocator as empty.");
         }
     }
 }
 
 #scope_file
 
-DEBUG :: true;
-
-increment_index :: inline (allocator: *BlockAllocator($T, $N), block_index: int, entry_index: int) -> block_index: int, entry_index: int {
-    if entry_index == N - 1 {
-        next_block_index := (block_index + 1) % allocator.memory.count;
-
-        return next_block_index, 0;
-    }
-
-    return block_index, entry_index + 1;
-}
-
 #import "Basic";
+
+// #run {
+//     allocator: BlockAllocator(int, 8);
+
+//     claim(*allocator, 123);
+//     two_three_four_pointer := claim(*allocator, 234);
+//     claim(*allocator, 345);
+
+//     for entry: allocator {
+//         print("% %\n", entry, it_index);
+//     }
+
+//     print("releasing 234\n");
+//     release(*allocator, two_three_four_pointer);
+
+//     print("count should be 2 %\n", allocator.count);
+//     print("memory count should be 1 %\n", allocator.memory.count);
+
+//     for entry: allocator {
+//         print("% %\n", entry, it_index);
+//     }
+
+//     claim(*allocator, 456);
+//     claim(*allocator, 567);
+//     six_seven_eight_pointer := claim(*allocator, 678);
+//     claim(*allocator, 789);
+//     eight_nine_one_pointer := claim(*allocator, 891);
+//     claim(*allocator, 123);
+
+//     print("count should be 8 %\n", allocator.count);
+//     print("memory count should be 1 %\n", allocator.memory.count);
+
+//     for entry: allocator {
+//         print("% %\n", entry, it_index);
+//     }
+
+//     release(*allocator, six_seven_eight_pointer);
+
+//     print("count should be 7 %\n", allocator.count);
+//     print("memory count should be 1 %\n", allocator.memory.count);
+
+//     for entry: allocator {
+//         print("% %\n", entry, it_index);
+//     }
+
+//     claim(*allocator, 234);
+//     three_four_five_pointer := claim(*allocator, 345);
+
+//     print("count should be 9 %\n", allocator.count);
+//     print("memory count should be 2 %\n", allocator.memory.count);
+
+//     for entry: allocator {
+//         print("% %\n", entry, it_index);
+//     }
+
+//     release(*allocator, eight_nine_one_pointer);
+
+//     print("count should be 8 %\n", allocator.count);
+//     print("memory count should be 2 %\n", allocator.memory.count);
+
+//     print("second bucket memory is %\n", allocator.memory[allocator.memory.count - 1].entries.data);
+
+//     for entry: allocator {
+//         print("% %\n", entry, it_index);
+//     }
+
+//     release(*allocator, three_four_five_pointer);
+
+//     print("count should be 7 %\n", allocator.count);
+//     print("memory count should be 1 %\n", allocator.memory.count);
+
+//     for entry: allocator {
+//         print("% %\n", entry, it_index);
+//     }
+
+//     claim(*allocator, 456);
+//     claim(*allocator, 567);
+
+//     print("count should be 9 %\n", allocator.count);
+//     print("memory count should be 2 %\n", allocator.memory.count);
+
+//     for entry: allocator {
+//         print("% %\n", entry, it_index);
+//     }
+
+//     print("second bucket memory is %\n", allocator.memory[allocator.memory.count - 1].entries.data);
+
+//     while allocator.count > 0 {
+//         release(*allocator, 0);
+//     }
+
+//     print("count should be 0 %\n", allocator.count);
+//     print("memory count should be 0 %\n", allocator.memory.count);
+
+//     for entry: allocator {
+//         print("% %\n", entry, it_index);
+//     }
+
+//     claim(*allocator, 123);
+
+//     print("count should be 1 %\n", allocator.count);
+//     print("memory count should be 1 %\n", allocator.memory.count);
+
+//     for entry: allocator {
+//         print("% %\n", entry, it_index);
+//     }
+// };
