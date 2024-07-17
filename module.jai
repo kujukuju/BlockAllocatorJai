@@ -70,7 +70,10 @@ operator [] :: (allocator: *BlockAllocator($T, $N), index: int) -> *T {
 for_expansion :: (allocator: *BlockAllocator($T, $N), body: Code, flags: For_Flags) #expand {
     #assert(!(flags & .REVERSE));
 
-    for index: 0..allocator.memory.count * N - 1 {
+    index := 0;
+    while index < allocator.memory.count * N {
+        defer index += 1;
+        
         block_index: int = index / N;
         entry_index: int = index % N;
 
@@ -81,16 +84,12 @@ for_expansion :: (allocator: *BlockAllocator($T, $N), body: Code, flags: For_Fla
         #if flags & .POINTER {
             `it_index := index;
             `it := *allocator.memory[block_index].entries[entry_index].item;
-
-            // defer memory[block_index].entries[entry_index].item = it.*;
-        
-            #insert body;
         } else {
             `it_index := index;
             `it := allocator.memory[block_index].entries[entry_index].item;
-        
-            #insert (remove={release(allocator, index);}) body;
         }
+
+        #insert (remove={release(allocator, index);}) body;
     }
 }
 
