@@ -10,9 +10,6 @@
 
 
 
-// TODO this library is a good idea, but it needs to use the idea of next indices for freeing AND allocating or its pointless
-// TODO this whole thing should use an index system to point into the previously freed memory like a circle
-
 BlockAllocator :: struct (T: Type, N: int = 64) {
     ITEM_OFFSET :: #run () -> int {
         struct_data := cast(*Type_Info_Struct) type_info(BlockEntry(T));
@@ -42,6 +39,34 @@ BlockEntry :: struct (T: Type) {
     item: T;
 }
 
+// TODO should use fancy next pointer things to hop around to only active memory, I think?
+for_expansion :: (allocator: *BlockAllocator($T, $N), body: Code, flags: For_Flags) #expand {
+    #assert(!(flags & .REVERSE));
+
+    // we can't use an actual for loop because remove could delete a chunk potentially
+    index := 0;
+    while index < allocator.memory.count * N {
+        defer index += 1;
+        
+        block_index: int = index / N;
+        entry_index: int = index % N;
+
+        if !allocator.memory[block_index].entries[entry_index].active {
+            continue;
+        }
+
+        #if flags & .POINTER {
+            `it := *allocator.memory[block_index].entries[entry_index].item;
+            `it_index := index;
+        } else {
+            `it := allocator.memory[block_index].entries[entry_index].item;
+            `it_index := index;
+        }
+
+        #insert (remove={release(allocator, index);}) body;
+    }
+}
+
 operator [] :: (allocator: BlockAllocator($T, $N), index: int) -> T {
     block_index: int = index / N;
     entry_index: int = index % N;
@@ -65,32 +90,21 @@ operator [] :: (allocator: *BlockAllocator($T, $N), index: int) -> *T {
     return *allocator.memory[block_index].entries[entry_index].item;
 }
 
-// TODO should use fancy next pointer things to hop around to only active memory, I think?
-// TODO this seems to have issues when looping in a multithreaded environment
-for_expansion :: (allocator: *BlockAllocator($T, $N), body: Code, flags: For_Flags) #expand {
-    #assert(!(flags & .REVERSE));
-
-    index := 0;
-    while index < allocator.memory.count * N {
-        defer index += 1;
-        
-        block_index: int = index / N;
-        entry_index: int = index % N;
-
-        if !allocator.memory[block_index].entries[entry_index].active {
-            continue;
-        }
-
-        #if flags & .POINTER {
-            `it_index := index;
-            `it := *allocator.memory[block_index].entries[entry_index].item;
-        } else {
-            `it_index := index;
-            `it := allocator.memory[block_index].entries[entry_index].item;
-        }
-
-        #insert (remove={release(allocator, index);}) body;
+get_first :: (allocator: BlockAllocator($T, $N)) -> *T {
+    for *entry: allocator {
+        return entry;
     }
+
+    return null;
+}
+
+pop_first :: (allocator: BlockAllocator($T, $N)) -> T {
+    for entry, entry_index: allocator {
+        release(*allocator, entry_index);
+        return entry;
+    }
+
+    return .{};
 }
 
 claim :: (allocator: *BlockAllocator($T, $N)) -> *T {
@@ -100,15 +114,7 @@ claim :: (allocator: *BlockAllocator($T, $N)) -> *T {
 
 claim :: (allocator: *BlockAllocator($T, $N), entry: T) -> *T {
     if allocator.count >= allocator.memory.count * N {
-        if allocator.memory.allocated > allocator.memory.count {
-            allocator.memory.count += 1;
-        } else {
-            array_resize(*allocator.memory, allocator.memory.count + 1,, allocator.allocator);
-        }
-
-        if allocator.memory[allocator.memory.count - 1].entries.data == null {
-            allocator.memory[allocator.memory.count - 1].entries = NewArray(N, BlockEntry(T),, allocator.allocator);
-        }
+        allocate_bucket(allocator);
     }
 
     for block_index: 0..allocator.memory.count - 1 {
@@ -128,6 +134,33 @@ claim :: (allocator: *BlockAllocator($T, $N), entry: T) -> *T {
     }
 
     return null;
+}
+
+// useful for doing things like queues since buckets will automatically get moved to the end on release when they're empty
+claim_end :: (allocator: *BlockAllocator($T, $N)) -> *T {
+    entry: T;
+    return claim_end(allocator, entry);
+}
+
+claim_end :: (allocator: *BlockAllocator($T, $N), entry: T) -> *T {
+    if allocator.memory.count == 0 || allocator.memory[allocator.memory.count - 1].entries[N - 1].active {
+        allocate_bucket(allocator);
+    }
+
+    last_empty_index := N - 1;
+    for < entry_index: N - 2..0 {
+        if allocator.memory[allocator.memory.count - 1].entries[entry_index].active {
+            break;
+        }
+
+        last_empty_index = entry_index;
+    }
+
+    allocator.memory[allocator.memory.count - 1].entries[last_empty_index].active = true;
+    allocator.memory[allocator.memory.count - 1].entries[last_empty_index].item = entry;
+    allocator.memory[allocator.memory.count - 1].count += 1;
+    allocator.count += 1;
+    return *allocator.memory[allocator.memory.count - 1].entries[last_empty_index].item;
 }
 
 release :: (allocator: *BlockAllocator($T, $N), entry: *T) {
@@ -194,7 +227,26 @@ validate_empty :: (allocator: BlockAllocator($T, $N)) {
     }
 }
 
+free :: (allocator: BlockAllocator($T, $N)) {
+    for block: allocator.memory {
+        array_free(block.entries,, allocator.allocator);
+    }
+    array_free(allocator.memory,, allocator.allocator);
+}
+
 #scope_file
+
+allocate_bucket :: (allocator: *BlockAllocator($T, $N)) {
+    if allocator.memory.allocated > allocator.memory.count {
+        allocator.memory.count += 1;
+    } else {
+        array_resize(*allocator.memory, allocator.memory.count + 1,, allocator.allocator);
+    }
+
+    if allocator.memory[allocator.memory.count - 1].entries.data == null {
+        allocator.memory[allocator.memory.count - 1].entries = NewArray(N, BlockEntry(T),, allocator.allocator);
+    }
+}
 
 #import "Basic";
 
