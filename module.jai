@@ -148,7 +148,7 @@ claim_end :: (allocator: *BlockAllocator($T, $N), entry: T) -> *T {
     }
 
     last_empty_index := N - 1;
-    for < entry_index: N - 2..0 {
+    for #v2 < entry_index: 0..N - 2 {
         if allocator.memory[allocator.memory.count - 1].entries[entry_index].active {
             break;
         }
