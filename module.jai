@@ -1,15 +1,4 @@
 
-
-
-
-
-
-
-
-
-
-
-
 BlockAllocator :: struct (T: Type, N: int = 64) {
     ITEM_OFFSET :: #run () -> int {
         struct_data := cast(*Type_Info_Struct) type_info(BlockEntry(T));
