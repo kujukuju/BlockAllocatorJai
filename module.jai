@@ -36,7 +36,7 @@ for_expansion :: (allocator: *BlockAllocator($T, $N), body: Code, flags: For_Fla
     index := 0;
     while index < allocator.memory.count * N {
         defer index += 1;
-        
+
         block_index: int = index / N;
         entry_index: int = index % N;
 
@@ -137,7 +137,7 @@ claim_end :: (allocator: *BlockAllocator($T, $N), entry: T) -> *T {
     }
 
     last_empty_index := N - 1;
-    for #v2 < entry_index: 0..N - 2 {
+    for < entry_index: 0..N - 2 {
         if allocator.memory[allocator.memory.count - 1].entries[entry_index].active {
             break;
         }
