@@ -197,11 +197,13 @@ release :: (allocator: *BlockAllocator($T, $N), index: int, $free_empty: bool = 
 }
 
 clear :: (allocator: *BlockAllocator($T, $N)) {
-    entries: [N] BlockEntry(T);
-
-    for block_index: 0..allocator.memory.count - 1 {
-        memcpy(allocator.memory[block_index].entries.data, entries.data, size_of(type_of(entries)));
-        allocator.memory[block_index].count = 0;
+    // A whole bucket of large items can overflow the embedded server thread stack.
+    empty: BlockEntry(T);
+    for *block: allocator.memory {
+        for *entry: block.entries {
+            entry.* = empty;
+        }
+        block.count = 0;
     }
 
     allocator.memory.count = 0;
